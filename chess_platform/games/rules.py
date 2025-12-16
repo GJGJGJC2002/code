@@ -2,6 +2,83 @@ from typing import Tuple, List, Optional, Set
 from chess_platform.core.interfaces import RuleStrategy, Board
 from chess_platform.core.patterns import PieceType
 
+class OthelloRule(RuleStrategy):
+    """
+    黑白棋规则：
+    - 合法落子：必须至少在一个方向上翻转对手棋子
+    - 落子后翻转被夹住的对手棋子
+    - 若当前玩家无合法落子，需跳过（由上层控制）
+    """
+    DIRECTIONS = [(1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)]
+
+    def is_valid_move(self, board: Board, x: int, y: int, player_piece: PieceType) -> Tuple[bool,str]:
+        if not board.is_valid_pos(x,y):
+            return False, "Position out of bounds"
+        if board.get_piece(x,y) is not None:
+            return False, "Position already occupied"
+        flips = self._get_flips(board,x,y,player_piece)
+        if not flips:
+            return False,"No pieces to flip"
+        return True,""
+
+    def post_move_action(self, board: Board, x: int, y: int, player_piece: PieceType) -> List[Tuple[int,int]]:
+        flips = self._get_flips(board,x,y,player_piece)
+        flipped_positions = []
+        for fx,fy in flips:
+            board.place_piece(fx,fy,player_piece)
+            flipped_positions.append((fx,fy))
+        return flipped_positions
+
+    def check_win(self, board: Board, last_x: int, last_y: int) -> Optional[str]:
+        # 判满盘或双方无合法步时：比较子数
+        empty_exists = any(board.get_piece(r,c) is None for r in range(board.size) for c in range(board.size))
+        if empty_exists:
+            return None
+        black = 0
+        white = 0
+        for r in range(board.size):
+            for c in range(board.size):
+                p = board.get_piece(r,c)
+                if p:
+                    if p.color_name == "Black":
+                        black += 1
+                    else:
+                        white += 1
+        if black == white:
+            return "Draw"
+        return "Black" if black>white else "White"
+
+    # ---------- 辅助函数 ----------
+    def _get_flips(self, board: Board, x: int, y: int, player_piece: PieceType) -> List[Tuple[int,int]]:
+        opponent_color = "White" if player_piece.color_name=="Black" else "Black"
+        flips = []
+        for dx,dy in self.DIRECTIONS:
+            line = []
+            cx,cy = x+dx, y+dy
+            while board.is_valid_pos(cx,cy):
+                cp = board.get_piece(cx,cy)
+                if cp is None:
+                    line = []
+                    break
+                if cp.color_name == opponent_color:
+                    line.append((cx,cy))
+                else:
+                    # 遇到自己颜色，若之前有对手棋子则可以翻转
+                    if line:
+                        flips.extend(line)
+                    break
+                cx += dx
+                cy += dy
+        return flips
+
+    def legal_moves(self, board: Board, player_piece: PieceType) -> List[Tuple[int,int]]:
+        moves = []
+        for r in range(board.size):
+            for c in range(board.size):
+                if board.get_piece(r,c) is None and self._get_flips(board,r,c,player_piece):
+                    moves.append((r,c))
+        return moves
+
 class GomokuRule(RuleStrategy):
     def is_valid_move(self, board: Board, x: int, y: int, player_piece: PieceType) -> Tuple[bool, str]:
         if not board.is_valid_pos(x, y):

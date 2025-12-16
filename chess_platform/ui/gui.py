@@ -5,6 +5,7 @@ from typing import Any
 
 from chess_platform.core.patterns import Observer
 from chess_platform.games.logic import GameFactory, GameContext
+from chess_platform.games.ai import RandomAI, GomokuHeuristicAI
 
 class ChessGUI(Observer):
     def __init__(self, root: tk.Tk):
@@ -17,6 +18,20 @@ class ChessGUI(Observer):
         self.cell_size = 30
         self.margin = 30
         self.piece_radius = 12
+        self.mode_vars = {
+            "Black": tk.StringVar(value="human"),
+            "White": tk.StringVar(value="human")
+        }
+        self.name_vars = {
+            "Black": tk.StringVar(value="Black"),
+            "White": tk.StringVar(value="White")
+        }
+        self.is_replaying = False
+        self.replay_moves = []
+        self.replay_idx = 0
+        self.replay_after_id = None
+        self.ai_after_id = None
+        self.ai_delay_ms = 1000
 
         # 初始化 UI 组件
         self._init_ui()
@@ -51,8 +66,19 @@ class ChessGUI(Observer):
         tk.Button(self.control_panel, text="New Go (19)", width=btn_width, 
                  command=lambda: self.ask_new_game("Go")).pack(pady=5)
 
+        tk.Button(self.control_panel, text="New Othello (8)", width=btn_width, 
+                 command=lambda: self.start_game("Othello", 8)).pack(pady=5)
+
         tk.Button(self.control_panel, text="Restart (重开)", width=btn_width, 
                  command=self.on_restart).pack(pady=5)
+
+        # 玩家模式选择
+        tk.Label(self.control_panel, text="Black 角色").pack()
+        tk.OptionMenu(self.control_panel, self.mode_vars["Black"], "human", "ai-rand", "ai-pro").pack()
+        tk.Entry(self.control_panel, textvariable=self.name_vars["Black"]).pack()
+        tk.Label(self.control_panel, text="White 角色").pack()
+        tk.OptionMenu(self.control_panel, self.mode_vars["White"], "human", "ai-rand", "ai-pro").pack()
+        tk.Entry(self.control_panel, textvariable=self.name_vars["White"]).pack()
 
         tk.Frame(self.control_panel, height=20).pack() # Spacer
 
@@ -83,11 +109,32 @@ class ChessGUI(Observer):
         self.game = GameFactory.create_game(game_type, size)
         # 观察者模式：注册自己监听棋盘变化
         self.game.board.attach(self)
+        # 配置玩家名称与 AI
+        for idx, color in enumerate(["Black","White"]):
+            mode = self.mode_vars[color].get()
+            name = self.name_vars[color].get() or color
+            self.game.players_name[idx] = name
+            if mode == "ai-rand":
+                ai = RandomAI(name=f"AI-Rand-{color}")
+                self.game.controllers[idx] = ai
+                self.game.players_role[idx] = "ai"
+            elif mode == "ai-pro":
+                if game_type.lower() == "gomoku":
+                    ai = GomokuHeuristicAI(name=f"AI-Pro-{color}")
+                else:
+                    ai = RandomAI(name=f"AI-Rand-{color}")
+                self.game.controllers[idx] = ai
+                self.game.players_role[idx] = "ai"
+            else:
+                self.game.controllers[idx] = None
+                self.game.players_role[idx] = "human"
         self.game.start()
         
         # 初始绘制
         self.update_status()
         self.draw_board()
+        # 若先手为 AI，立即执行
+        self.schedule_ai()
 
     # ==========================================
     # Observer 接口实现
@@ -183,13 +230,16 @@ class ChessGUI(Observer):
             self.lbl_info.config(text=f"Playing: {self.game.game_type}", fg="black")
             
         p = self.game.current_player
-        self.lbl_player.config(text=f"Current Turn: {p.color_name}")
+        name = self.game.players_name[self.game.current_player_idx]
+        self.lbl_player.config(text=f"Current Turn: {name} ({p.color_name})")
 
     # ==========================================
     # 事件处理 (Controller)
     # ==========================================
     def on_board_click(self, event):
         if self.game.is_game_over:
+            return
+        if self.is_replaying:
             return
 
         # 将屏幕坐标转换为网格坐标
@@ -215,6 +265,8 @@ class ChessGUI(Observer):
             if not success:
                 # 可能是围棋的自杀手或者其他规则限制
                 messagebox.showwarning("Invalid Move", "Move not allowed by rules (e.g. suicide or Ko).")
+            else:
+                self.schedule_ai()
 
     def on_undo(self):
         if not self.game.undo_move():
@@ -238,14 +290,86 @@ class ChessGUI(Observer):
     def on_load(self):
         filepath = filedialog.askopenfilename()
         if filepath:
-            # 加载需要重新绑定 observer ?
-            # 我们的 load_game 实现是原位恢复数据，不需要重新 new game，所以 observer 关系还在
-            if self.game.load_game(filepath):
-                self.draw_board() # 强制重绘一次，以防万一
+            import pickle
+            try:
+                with open(filepath,"rb") as f:
+                    data = pickle.load(f)
+                moves = data.get("move_log", [])
+                game_type = data.get("type","Gomoku")
+                size = data.get("size",15)
+                # 终止正在进行的 AI/回放
+                if self.ai_after_id:
+                    self.root.after_cancel(self.ai_after_id)
+                    self.ai_after_id = None
+                if self.replay_after_id:
+                    self.root.after_cancel(self.replay_after_id)
+                    self.replay_after_id = None
+                # 使用新实例，空盘开始回放
+                self.game = GameFactory.create_game(game_type, size)
+                self.game.board.attach(self)
+                self.game.start()
+                self.is_replaying = True
+                self.replay_moves = moves
+                self.replay_idx = 0
                 self.update_status()
-                messagebox.showinfo("Success", "Game loaded.")
-            else:
-                messagebox.showerror("Error", "Failed to load game.")
+                self.draw_board()
+                self._replay_step()
+            except Exception as e:
+                messagebox.showerror("Error", f"Load/Replay failed: {e}")
+
+    def _replay_step(self):
+        if not self.is_replaying:
+            return
+        if self.replay_idx >= len(self.replay_moves):
+            self.is_replaying = False
+            return
+        step = self.replay_moves[self.replay_idx]
+        color = step["color"]
+        piece = self.game.players[0] if color == "Black" else self.game.players[1]
+        x, y = step["x"], step["y"]
+        self.game.board.place_piece(x, y, piece)
+        self.game.board.last_move = (x, y)
+        self.replay_idx += 1
+        self.update_status()
+        self.draw_board()
+        # 1s 间隔
+        self.replay_after_id = self.root.after(1000, self._replay_step)
+
+    # ============ AI 演示（非阻塞） ============
+    def schedule_ai(self):
+        # 若当前轮到 AI，则安排一步后再继续
+        if self.ai_after_id:
+            self.root.after_cancel(self.ai_after_id)
+            self.ai_after_id = None
+        if self.is_replaying:
+            return
+        ctrl = self.game.controllers[self.game.current_player_idx]
+        if ctrl is None:
+            return
+        # 安排一步
+        self.ai_after_id = self.root.after(self.ai_delay_ms, self._ai_step)
+
+    def _ai_step(self):
+        self.ai_after_id = None
+        if self.is_replaying or self.game.is_game_over:
+            return
+        ctrl = self.game.controllers[self.game.current_player_idx]
+        if ctrl is None:
+            return
+        # Othello 无合法步则跳过
+        from chess_platform.games import ai as ai_mod
+        if self.game.game_type.lower() == "othello" and not ai_mod.legal_moves(self.game):
+            self.game.switch_player()
+            self.update_status()
+            self.draw_board()
+            self.schedule_ai()
+            return
+        move = ctrl.select_move(self.game)
+        if move is None:
+            return
+        x,y = move
+        if self.game.make_move(x, y):
+            self.schedule_ai()
 
     def on_restart(self):
         self.game.start()

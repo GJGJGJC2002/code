@@ -4,6 +4,8 @@ from typing import Any
 from chess_platform.core.interfaces import Board
 from chess_platform.core.patterns import Observer
 from chess_platform.games.logic import GameContext, GameFactory
+from chess_platform.games.ai import RandomAI, GomokuHeuristicAI
+from chess_platform.utils import account
 
 class ScreenBuilder:
     """
@@ -50,6 +52,7 @@ class ScreenBuilder:
             self.parts.append("  undo               : Undo last move")
             self.parts.append("  save <filename>    : Save game")
             self.parts.append("  load <filename>    : Load game")
+            self.parts.append("  replay <filename>  : Replay a saved game")
             self.parts.append("  restart            : Restart game")
             self.parts.append("  quit               : Exit")
             self.parts.append("  help               : Toggle help")
@@ -69,28 +72,101 @@ class ConsoleUI(Observer):
 
     def start(self):
         print("Welcome to Python Chess Platform")
-        print("1. Gomoku (Five-in-a-row)")
-        print("2. Go (Weiqi)")
+        print("1. Gomoku (五子棋)")
+        print("2. Go (围棋)")
+        print("3. Othello (黑白棋)")
         
-        choice = input("Select Game (1 or 2): ").strip()
-        size_str = input("Enter board size (8-19, default 15): ").strip()
+        choice = input("Select Game (1/2/3): ").strip()
+        if choice not in ["1","2","3"]:
+            choice = "1"
+        if choice == "1":
+            game_type = "Gomoku"
+            default_size = 15
+        elif choice == "2":
+            game_type = "Go"
+            default_size = 19
+        else:
+            game_type = "Othello"
+            default_size = 8
+
+        size_str = input(f"Enter board size (8-19, default {default_size}): ").strip()
         try:
             size = int(size_str)
             if not (8 <= size <= 19): raise ValueError
         except:
-            size = 15
+            size = default_size
 
-        game_type = "Gomoku" if choice == "1" else "Go"
-        
         # 使用工厂创建游戏
         self.game = GameFactory.create_game(game_type, size)
+        self._setup_players()
         
         # 注册观察者
         self.game.board.attach(self)
         
         self.game.start()
+        # 如果先手是 AI，立即执行
+        self.game._auto_play_if_ai()
         self.render()
         self.input_loop()
+
+    def _setup_players(self):
+        # 玩家身份与 AI 难度
+        for idx, color in enumerate(["Black","White"]):
+            print(f"\n配置 {color} 方：")
+            print("1. 人类玩家")
+            print("2. AI-随机（一级）")
+            print("3. AI-规则（五子棋二级，其他随机）")
+            role = input("选择(1/2/3): ").strip()
+            if role == "2":
+                ai = RandomAI(name=f"AI-Random-{color}")
+                self.game.controllers[idx] = ai
+                self.game.players_name[idx] = ai.name
+                self.game.players_role[idx] = "ai"
+            elif role == "3":
+                if self.game.game_type.lower() == "gomoku":
+                    ai = GomokuHeuristicAI(name=f"AI-Pro-{color}")
+                else:
+                    ai = RandomAI(name=f"AI-Random-{color}")
+                self.game.controllers[idx] = ai
+                self.game.players_name[idx] = ai.name
+                self.game.players_role[idx] = "ai"
+            else:
+                self.game.controllers[idx] = None
+                self.game.players_role[idx] = "human"
+                self._handle_login(idx)
+
+    def _handle_login(self, idx: int):
+        need_login = input("登录账户? (y/N): ").strip().lower() == "y"
+        if not need_login:
+            self.game.players_name[idx] = f"Player{idx+1}"
+            self.game.players_account[idx] = None
+            return
+        username = input("用户名: ").strip()
+        if username == "":
+            username = f"Player{idx+1}"
+        has_account = input("已有账户? (y/N): ").strip().lower() == "y"
+        if has_account:
+            pwd = input("密码: ").strip()
+            if account.login(username,pwd):
+                self.game.players_name[idx] = username
+                self.game.players_account[idx] = username
+                self.game.players_role[idx] = "login"
+                print("登录成功")
+            else:
+                print("登录失败，使用游客")
+                self.game.players_name[idx] = f"Guest{idx+1}"
+                self.game.players_account[idx] = None
+        else:
+            pwd = input("设置密码: ").strip()
+            if account.register(username,pwd):
+                print("注册成功并自动登录")
+                self.game.players_name[idx] = username
+                self.game.players_account[idx] = username
+                self.game.players_role[idx] = "login"
+            else:
+                print("注册失败，可能已存在。使用游客")
+                self.game.players_name[idx] = f"Guest{idx+1}"
+                self.game.players_account[idx] = None
 
     def update(self, subject: Any, *args, **kwargs):
         # 收到 Board 通知时重绘
@@ -163,9 +239,37 @@ class ConsoleUI(Observer):
                         print(f"Game loaded from {fname}")
                         self.render()
 
+                elif action == "replay":
+                    fname = parts[1] if len(parts) > 1 else "savegame.dat"
+                    self.replay(fname)
+
                 else:
                     print("Unknown command.")
 
             except Exception as e:
                 print(f"Error: {e}")
+
+    def replay(self, filepath: str):
+        import pickle, time
+        try:
+            with open(filepath, "rb") as f:
+                data = pickle.load(f)
+            snapshot = data["snapshot"]
+            moves = data.get("move_log", [])
+            size = snapshot["size"]
+            game_type = data.get("type","Gomoku")
+            temp_game = GameFactory.create_game(game_type, size)
+            temp_game.board.restore_snapshot({"size":size,"grid":[[None for _ in range(size)] for _ in range(size)],"last_move":None})
+            temp_game.board.attach(self)
+            print(f"Replaying {filepath}, moves={len(moves)}")
+            for step in moves:
+                color = step["color"]
+                piece = temp_game.players[0] if color=="Black" else temp_game.players[1]
+                temp_game.board.place_piece(step["x"], step["y"], piece)
+                temp_game.board.last_move = (step["x"], step["y"])
+                self.render()
+                time.sleep(0.3)
+            print("Replay finished.")
+        except Exception as e:
+            print(f"Replay failed: {e}")
 
