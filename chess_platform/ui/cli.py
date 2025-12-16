@@ -4,7 +4,7 @@ from typing import Any
 from chess_platform.core.interfaces import Board
 from chess_platform.core.patterns import Observer
 from chess_platform.games.logic import GameContext, GameFactory
-from chess_platform.games.ai import RandomAI, GomokuHeuristicAI
+from chess_platform.games.ai import RandomAI, GomokuHeuristicAI, GomokuMCTS
 from chess_platform.utils import account
 
 class ScreenBuilder:
@@ -116,6 +116,7 @@ class ConsoleUI(Observer):
             print("1. 人类玩家")
             print("2. AI-随机（一级）")
             print("3. AI-规则（五子棋二级，其他随机）")
+            print("4. AI-MCTS（五子棋三级，其他随机）")
             role = input("选择(1/2/3): ").strip()
             if role == "2":
                 ai = RandomAI(name=f"AI-Random-{color}")
@@ -125,6 +126,14 @@ class ConsoleUI(Observer):
             elif role == "3":
                 if self.game.game_type.lower() == "gomoku":
                     ai = GomokuHeuristicAI(name=f"AI-Pro-{color}")
+                else:
+                    ai = RandomAI(name=f"AI-Random-{color}")
+                self.game.controllers[idx] = ai
+                self.game.players_name[idx] = ai.name
+                self.game.players_role[idx] = "ai"
+            elif role == "4":
+                if self.game.game_type.lower() == "gomoku":
+                    ai = GomokuMCTS(name=f"AI-MCTS-{color}")
                 else:
                     ai = RandomAI(name=f"AI-Random-{color}")
                 self.game.controllers[idx] = ai

@@ -41,9 +41,10 @@ class MoveCommand(Command):
         if winner:
             self.game.winner = winner
             self.game.is_game_over = True
+            # 先更新战绩，再通知 UI（保证 UI 刷新到最新战绩）
+            self.game.on_game_over(winner)
             # 显式通知 UI 游戏结束，以便弹出提示
             self.game.board.notify(event="game_over", winner=winner)
-            self.game.on_game_over(winner)
         
         # 6. 切换执子
         self.game.switch_player()
@@ -219,24 +220,4 @@ class GameFactory:
             return GameContext(size, OthelloRule(), "Othello")
         else:
             raise ValueError("Unknown game type")
-
-    # --------- 结果记录 ---------
-    def on_game_over(self, winner: str):
-        from chess_platform.utils import account
-        # winner: "Black"/"White"/"Draw"
-        if winner == "Draw":
-            for acc in self.players_account:
-                if acc:
-                    account.update_result(acc, "draw")
-            return
-        win_idx = 0 if winner == "Black" else 1
-        lose_idx = 1 - win_idx
-        if self.players_account[win_idx]:
-            account.update_result(self.players_account[win_idx], "win")
-        if self.players_account[lose_idx]:
-            account.update_result(self.players_account[lose_idx], "loss")
-
-    # --------- 录像数据 ---------
-    def log_move(self, x:int, y:int, color:str):
-        self.move_log.append({"x":x,"y":y,"color":color,"move_idx":len(self.move_log)+1})
 

@@ -6,12 +6,13 @@ from typing import Any
 from chess_platform.core.patterns import Observer
 from chess_platform.games.logic import GameFactory, GameContext
 from chess_platform.games.ai import RandomAI, GomokuHeuristicAI
+from chess_platform.utils import account
 
 class ChessGUI(Observer):
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Python Chess Platform (OOD Assignment)")
-        self.root.geometry("800x640")
+        self.root.geometry("800x750")
         self.root.resizable(False, False)
 
         self.game: GameContext = None
@@ -26,6 +27,10 @@ class ChessGUI(Observer):
             "Black": tk.StringVar(value="Black"),
             "White": tk.StringVar(value="White")
         }
+        # 账户信息：None 表示游客
+        self.login_accounts = {"Black": None, "White": None}
+        self.stats_vars = {"Black": tk.StringVar(value="战绩: -"),
+                           "White": tk.StringVar(value="战绩: -")}
         self.is_replaying = False
         self.replay_moves = []
         self.replay_idx = 0
@@ -36,6 +41,9 @@ class ChessGUI(Observer):
         # 初始化 UI 组件
         self._init_ui()
         
+        # 启动时登录/注册
+        self.show_login_dialog()
+
         # 默认启动一个五子棋游戏
         self.start_game("Gomoku", 15)
 
@@ -74,11 +82,13 @@ class ChessGUI(Observer):
 
         # 玩家模式选择
         tk.Label(self.control_panel, text="Black 角色").pack()
-        tk.OptionMenu(self.control_panel, self.mode_vars["Black"], "human", "ai-rand", "ai-pro").pack()
+        tk.OptionMenu(self.control_panel, self.mode_vars["Black"], "human", "ai-rand", "ai-pro", "ai-mcts").pack()
         tk.Entry(self.control_panel, textvariable=self.name_vars["Black"]).pack()
+        tk.Label(self.control_panel, textvariable=self.stats_vars["Black"], font=("Arial", 9)).pack()
         tk.Label(self.control_panel, text="White 角色").pack()
-        tk.OptionMenu(self.control_panel, self.mode_vars["White"], "human", "ai-rand", "ai-pro").pack()
+        tk.OptionMenu(self.control_panel, self.mode_vars["White"], "human", "ai-rand", "ai-pro", "ai-mcts").pack()
         tk.Entry(self.control_panel, textvariable=self.name_vars["White"]).pack()
+        tk.Label(self.control_panel, textvariable=self.stats_vars["White"], font=("Arial", 9)).pack()
 
         tk.Frame(self.control_panel, height=20).pack() # Spacer
 
@@ -112,12 +122,26 @@ class ChessGUI(Observer):
         # 配置玩家名称与 AI
         for idx, color in enumerate(["Black","White"]):
             mode = self.mode_vars[color].get()
-            name = self.name_vars[color].get() or color
-            self.game.players_name[idx] = name
+            # human 时使用登录信息；AI 时显示 AI
+            if mode == "human":
+                acc = self.login_accounts.get(color)
+                if acc:
+                    self.game.players_name[idx] = acc
+                    self.game.players_account[idx] = acc
+                    self.game.players_role[idx] = "login"
+                    self.name_vars[color].set(acc)
+                else:
+                    guest = f"Guest-{color}"
+                    self.game.players_name[idx] = guest
+                    self.game.players_account[idx] = None
+                    self.game.players_role[idx] = "visitor"
+                    self.name_vars[color].set(guest)
             if mode == "ai-rand":
                 ai = RandomAI(name=f"AI-Rand-{color}")
                 self.game.controllers[idx] = ai
                 self.game.players_role[idx] = "ai"
+                self.game.players_name[idx] = "AI"
+                self.game.players_account[idx] = None
             elif mode == "ai-pro":
                 if game_type.lower() == "gomoku":
                     ai = GomokuHeuristicAI(name=f"AI-Pro-{color}")
@@ -125,9 +149,24 @@ class ChessGUI(Observer):
                     ai = RandomAI(name=f"AI-Rand-{color}")
                 self.game.controllers[idx] = ai
                 self.game.players_role[idx] = "ai"
-            else:
+                self.game.players_name[idx] = "AI"
+                self.game.players_account[idx] = None
+            elif mode == "ai-mcts":
+                from chess_platform.games.ai import GomokuMCTS
+                if game_type.lower() == "gomoku":
+                    ai = GomokuMCTS(name=f"AI-MCTS-{color}")
+                else:
+                    ai = RandomAI(name=f"AI-Rand-{color}")
+                self.game.controllers[idx] = ai
+                self.game.players_role[idx] = "ai"
+                self.game.players_name[idx] = "AI"
+                self.game.players_account[idx] = None
+            elif mode == "human":
                 self.game.controllers[idx] = None
-                self.game.players_role[idx] = "human"
+            else:
+                # 兜底
+                self.game.controllers[idx] = None
+                self.game.players_role[idx] = "visitor"
         self.game.start()
         
         # 初始绘制
@@ -233,6 +272,10 @@ class ChessGUI(Observer):
         name = self.game.players_name[self.game.current_player_idx]
         self.lbl_player.config(text=f"Current Turn: {name} ({p.color_name})")
 
+        # 刷新双方战绩展示
+        self.stats_vars["Black"].set(self._format_stats(0))
+        self.stats_vars["White"].set(self._format_stats(1))
+
     # ==========================================
     # 事件处理 (Controller)
     # ==========================================
@@ -297,6 +340,9 @@ class ChessGUI(Observer):
                 moves = data.get("move_log", [])
                 game_type = data.get("type","Gomoku")
                 size = data.get("size",15)
+                # 关联账户/名称（用于右侧展示与回放标注）
+                loaded_names = data.get("players_name", ["Black", "White"])
+                loaded_accounts = data.get("players_account", [None, None])
                 # 终止正在进行的 AI/回放
                 if self.ai_after_id:
                     self.root.after_cancel(self.ai_after_id)
@@ -307,6 +353,8 @@ class ChessGUI(Observer):
                 # 使用新实例，空盘开始回放
                 self.game = GameFactory.create_game(game_type, size)
                 self.game.board.attach(self)
+                self.game.players_name = loaded_names
+                self.game.players_account = loaded_accounts
                 self.game.start()
                 self.is_replaying = True
                 self.replay_moves = moves
@@ -316,6 +364,98 @@ class ChessGUI(Observer):
                 self._replay_step()
             except Exception as e:
                 messagebox.showerror("Error", f"Load/Replay failed: {e}")
+
+    # ============ 登录/注册 ============
+    def show_login_dialog(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("用户登录/注册")
+        dlg.geometry("420x260")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        mode_var_b = tk.StringVar(value="guest")
+        mode_var_w = tk.StringVar(value="guest")
+        user_b = tk.StringVar(value="")
+        pwd_b = tk.StringVar(value="")
+        user_w = tk.StringVar(value="")
+        pwd_w = tk.StringVar(value="")
+
+        def build_block(parent, title, mode_var, user_var, pwd_var):
+            frame = tk.LabelFrame(parent, text=title)
+            frame.pack(fill=tk.X, padx=10, pady=6)
+            row1 = tk.Frame(frame); row1.pack(anchor="w")
+            tk.Radiobutton(row1, text="游客", variable=mode_var, value="guest").pack(side=tk.LEFT)
+            tk.Radiobutton(row1, text="登录", variable=mode_var, value="login").pack(side=tk.LEFT)
+            tk.Radiobutton(row1, text="注册", variable=mode_var, value="register").pack(side=tk.LEFT)
+            row2 = tk.Frame(frame); row2.pack(fill=tk.X, pady=2)
+            tk.Label(row2, text="用户名").pack(side=tk.LEFT)
+            tk.Entry(row2, textvariable=user_var, width=18).pack(side=tk.LEFT, padx=5)
+            row3 = tk.Frame(frame); row3.pack(fill=tk.X, pady=2)
+            tk.Label(row3, text="密码  ").pack(side=tk.LEFT)
+            tk.Entry(row3, textvariable=pwd_var, show="*", width=18).pack(side=tk.LEFT, padx=5)
+
+        build_block(dlg, "Black 玩家", mode_var_b, user_b, pwd_b)
+        build_block(dlg, "White 玩家", mode_var_w, user_w, pwd_w)
+
+        def apply_one(color, mode_var, user_var, pwd_var):
+            mode = mode_var.get()
+            u = user_var.get().strip()
+            p = pwd_var.get().strip()
+            if mode == "guest":
+                self.login_accounts[color] = None
+                return True
+            if u == "" or p == "":
+                messagebox.showerror("错误", f"{color} 选择登录/注册时用户名和密码不能为空")
+                return False
+            if mode == "login":
+                if not account.login(u, p):
+                    messagebox.showerror("错误", f"{color} 登录失败：用户名或密码错误")
+                    return False
+                self.login_accounts[color] = u
+                return True
+            if mode == "register":
+                if not account.register(u, p):
+                    messagebox.showerror("错误", f"{color} 注册失败：用户名已存在")
+                    return False
+                self.login_accounts[color] = u
+                return True
+            return True
+
+        def on_ok():
+            if not apply_one("Black", mode_var_b, user_b, pwd_b):
+                return
+            if not apply_one("White", mode_var_w, user_w, pwd_w):
+                return
+            # 回填显示名称
+            if self.login_accounts["Black"]:
+                self.name_vars["Black"].set(self.login_accounts["Black"])
+            else:
+                self.name_vars["Black"].set("Guest-Black")
+            if self.login_accounts["White"]:
+                self.name_vars["White"].set(self.login_accounts["White"])
+            else:
+                self.name_vars["White"].set("Guest-White")
+            dlg.destroy()
+
+        btn_row = tk.Frame(dlg)
+        btn_row.pack(pady=10)
+        tk.Button(btn_row, text="确定", width=10, command=on_ok).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_row, text="跳过(游客)", width=12, command=lambda: dlg.destroy()).pack(side=tk.LEFT, padx=6)
+
+        self.root.wait_window(dlg)
+
+    def _format_stats(self, idx: int) -> str:
+        # idx 0=Black, 1=White
+        if not hasattr(self, "game") or self.game is None:
+            return "战绩: -"
+        role = self.game.players_role[idx] if idx < len(self.game.players_role) else "visitor"
+        acc = self.game.players_account[idx] if idx < len(self.game.players_account) else None
+        if role == "ai":
+            return "战绩: AI"
+        if not acc:
+            return "战绩: 游客"
+        st = account.get_stats(acc) or {}
+        return f"战绩: 场次{st.get('games',0)} 胜{st.get('win',0)} 平{st.get('draw',0)} 负{st.get('loss',0)}"
 
     def _replay_step(self):
         if not self.is_replaying:
